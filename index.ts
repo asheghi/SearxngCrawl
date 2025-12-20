@@ -35,8 +35,11 @@ app.get('/search', async (req: Request, res: Response) => {
     const query = req.query.q as string;
     if (!query) return res.status(400).send("Missing query parameter 'q'");
 
+    console.log(`[Search] Received query: "${query}"`);
+
     try {
         // 1. DISCOVER: Get top URLs from SearXNG
+        console.log(`[Search] Fetching results from SearXNG: ${SEARXNG_URL}`);
         const searchResponse = await axios.get(`${SEARXNG_URL}/search`, {
             params: { q: query, format: 'json' }
         });
@@ -44,9 +47,15 @@ app.get('/search', async (req: Request, res: Response) => {
         const results: SearchResult[] = searchResponse.data.results || [];
         const urls = results.slice(0, 3).map(r => r.url);
 
-        if (urls.length === 0) return res.send("# No results found\nTry a different query.");
+        if (urls.length === 0) {
+            console.log(`[Search] No results found for: "${query}"`);
+            return res.send("# No results found\nTry a different query.");
+        }
+
+        console.log(`[Search] Found ${urls.length} URLs to crawl:`, urls);
 
         // 2. CRAWL: Submit batch to Crawl4AI
+        console.log(`[Crawl] Submitting task to Crawl4AI: ${CRAWLER_URL}`);
         const crawlSubmission = await axios.post<CrawlTaskResponse>(`${CRAWLER_URL}/crawl`, {
             urls: urls,
             browser_config: { headless: true, text_mode: true },
@@ -65,32 +74,16 @@ app.get('/search', async (req: Request, res: Response) => {
             }
         });
 
-        const taskId = crawlSubmission.data.task_id;
-
-        // 3. POLL: Wait internally for completion
-        let finalMarkdown = `# Search Results for: ${query}\n\n`;
-        let completed = false;
-        
-        while (!completed) {
-            await new Promise(r => setTimeout(r, 1500)); // Check every 1.5s
-            const taskStatus = await axios.get<TaskStatusResponse>(`${CRAWLER_URL}/task/${taskId}`);
-            
-            if (taskStatus.data.status === 'completed') {
-                taskStatus.data.results.forEach((result, index) => {
-                    finalMarkdown += `## [${index + 1}] Source: ${result.url}\n\n${result.markdown}\n\n---\n\n`;
-                });
-                completed = true;
-            } else if (taskStatus.data.status === 'failed') {
-                throw new Error("Crawl4AI failed to process the request.");
-            }
-        }
-
-        // 4. RESPOND: Return the combined Markdown
-        res.setHeader('Content-Type', 'text/markdown');
-        res.send(finalMarkdown);
+        res.json(((crawlSubmission.data as any)?.results || []).map((result: any) => ({
+            url: result?.url,
+            title: result?.metadata?.title,
+            links: result?.links,
+            description: result?.metadata?.description,
+            markdown: result?.markdown?.raw_markdown
+        })));
 
     } catch (error: any) {
-        console.error(error);
+        console.error(`[Error] ${error.message}`);
         res.status(500).send(`## Error\n${error.message}`);
     }
 });
